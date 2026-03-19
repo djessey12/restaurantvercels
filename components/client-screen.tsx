@@ -1,5 +1,5 @@
 'use client'
-
+import { useRealtimeChannel } from '@/hooks/use-realtime-channel'
 import { useState, useEffect } from 'react'
 import { getAuth, api, formatPrice, getTrackedOrder, setTrackedOrder, sounds } from '@/lib/store'
 import { ArrowLeft, Search, Check, Clock, ChefHat, Bell, UtensilsCrossed, Star, ShieldCheck } from 'lucide-react'
@@ -82,48 +82,33 @@ export function ClientScreen({ onBack, initialOrderId }: { onBack: () => void; i
     }
   }
 
-  useEffect(() => {
-    if (orderId) fetchOrder(orderId)
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  useRealtimeChannel('client', auth?.token, (data) => {
+    const payload = data.payload as Record<string, unknown>
 
-  // SSE for real-time updates
-  useEffect(() => {
-    if (!auth?.token || !order) return
-    const eventSource = new EventSource(`/api/events?channel=client&token=${auth.token}`)
+    if (payload?.id !== order?.id) return
 
-    eventSource.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data)
-        const payload = data.payload
-
-        if (payload?.id !== order?.id) return
-
-        // Update order
-        if (payload.status) {
-          setOrder(prev => prev ? { ...prev, status: payload.status, items: payload.items || prev.items } : prev)
-        }
-
-        // Play sounds and show notifications
-        const notifMap: Record<string, { msg: string; color: string; sound: () => void }> = {
-          ORDER_VALIDATED: { msg: payload.message || 'Votre commande a ete validee par la caisse !', color: 'var(--green)', sound: sounds.acknowledged },
-          ORDER_ACKNOWLEDGED: { msg: 'Votre commande a ete prise en compte par la cuisine !', color: 'var(--blue)', sound: sounds.acknowledged },
-          ORDER_PREPARING: { msg: 'Votre commande est en preparation !', color: 'var(--orange)', sound: sounds.preparing },
-          ORDER_READY: { msg: 'Votre commande est prete !', color: 'var(--green)', sound: sounds.orderReady },
-          ORDER_SERVED: { msg: 'Bon appetit !', color: 'var(--gold)', sound: sounds.served },
-          ORDER_CANCELLED: { msg: payload.message || 'Votre commande a ete annulee', color: 'var(--red)', sound: sounds.served },
-        }
-
-        const notif = notifMap[data.type]
-        if (notif) {
-          notif.sound()
-          setNotification({ message: notif.msg, color: notif.color })
-          setTimeout(() => setNotification(null), 8000)
-        }
-      } catch {}
+    // Update order
+    if (payload.status) {
+      setOrder(prev => prev ? { ...prev, status: payload.status as Order['status'], items: (payload.items as Order['items']) || prev.items } : prev)
     }
 
-    return () => eventSource.close()
-  }, [auth?.token, order?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+    // Play sounds and show notifications
+    const notifMap: Record<string, { msg: string; color: string; sound: () => void }> = {
+      ORDER_VALIDATED:    { msg: (payload.message as string) || 'Votre commande a ete validee par la caisse !', color: 'var(--green)',  sound: sounds.acknowledged },
+      ORDER_ACKNOWLEDGED: { msg: 'Votre commande a ete prise en compte par la cuisine !',                       color: 'var(--blue)',   sound: sounds.acknowledged },
+      ORDER_PREPARING:    { msg: 'Votre commande est en preparation !',                                         color: 'var(--orange)', sound: sounds.preparing    },
+      ORDER_READY:        { msg: 'Votre commande est prete !',                                                  color: 'var(--green)',  sound: sounds.orderReady   },
+      ORDER_SERVED:       { msg: 'Bon appetit !',                                                               color: 'var(--gold)',   sound: sounds.served       },
+      ORDER_CANCELLED:    { msg: (payload.message as string) || 'Votre commande a ete annulee',                 color: 'var(--red)',    sound: sounds.served       },
+    }
+
+    const notif = notifMap[data.type]
+    if (notif) {
+      notif.sound()
+      setNotification({ message: notif.msg, color: notif.color })
+      setTimeout(() => setNotification(null), 8000)
+    }
+  })
 
   async function handleRate(rating: number) {
     if (!order || ratingSubmitted) return

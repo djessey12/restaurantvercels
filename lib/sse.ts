@@ -1,63 +1,67 @@
-// SSE Event Manager
+/**
+ * lib/sse.ts — Broadcast temps-réel via Supabase Realtime HTTP API
+ *
+ * Remplace l'ancien système SSE en mémoire (qui ne fonctionnait pas
+ * sur Vercel à cause de l'isolation des fonctions serverless).
+ *
+ * Le serveur envoie des messages via l'API HTTP de Supabase Realtime.
+ * Les clients s'abonnent via Supabase Realtime (WebSocket) côté navigateur.
+ *
+ * Interface identique à l'ancienne sse.ts : broadcast() / broadcastAll()
+ */
 
-type SSEClient = {
-  id: string
-  channel: string
-  controller: ReadableStreamDefaultController
+const SUPABASE_URL          = process.env.NEXT_PUBLIC_SUPABASE_URL!
+const SUPABASE_SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY!
+
+type RealtimeEvent = {
+  type:     string
+  payload:  unknown
+  sound?:   string
 }
 
-const clients: SSEClient[] = []
+/** Envoie un événement sur un ou plusieurs canaux Supabase Realtime */
+export async function broadcast(
+  channels: string[],
+  event: RealtimeEvent
+): Promise<void> {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+    console.warn('[realtime] Variables Supabase manquantes — broadcast ignoré')
+    return
+  }
 
-export function addClient(channel: string, controller: ReadableStreamDefaultController): string {
-  const id = Math.random().toString(36).slice(2)
-  clients.push({ id, channel, controller })
-  
-  // Send connected event
-  const data = `data: ${JSON.stringify({ type: 'CONNECTED', payload: { channel } })}\n\n`
-  try { controller.enqueue(new TextEncoder().encode(data)) } catch {}
-  
-  return id
-}
+  const messages = channels.map(channel => ({
+    topic:   `realtime:${channel}`,
+    event:   event.type,
+    payload: event,
+  }))
 
-export function removeClient(id: string) {
-  const idx = clients.findIndex(c => c.id === id)
-  if (idx !== -1) clients.splice(idx, 1)
-}
-
-export function broadcast(channels: string[], event: { type: string; payload: unknown; sound?: string }) {
-  const data = `data: ${JSON.stringify(event)}\n\n`
-  const encoded = new TextEncoder().encode(data)
-  
-  for (const client of clients) {
-    if (channels.includes(client.channel)) {
-      try {
-        client.controller.enqueue(encoded)
-      } catch {
-        // Client disconnected, will be cleaned up
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/realtime/v1/api/broadcast`,
+      {
+        method:  'POST',
+        headers: {
+          'Content-Type':  'application/json',
+          'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+          'apikey':        SUPABASE_SERVICE_KEY,
+        },
+        body: JSON.stringify({ messages }),
       }
+    )
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '')
+      console.error(`[realtime] broadcast échoué (${res.status}): ${txt}`)
     }
+  } catch (err) {
+    // Ne pas crasher la route API si le broadcast échoue
+    console.error('[realtime] Erreur broadcast:', err)
   }
 }
 
-export function broadcastAll(event: { type: string; payload: unknown }) {
-  const data = `data: ${JSON.stringify(event)}\n\n`
-  const encoded = new TextEncoder().encode(data)
-  
-  for (const client of clients) {
-    try {
-      client.controller.enqueue(encoded)
-    } catch {}
-  }
+/** Envoie un événement sur TOUS les canaux connus */
+export async function broadcastAll(event: RealtimeEvent): Promise<void> {
+  return broadcast(['caisse', 'cuisine', 'client'], event)
 }
 
-// Keep-alive ping every 20 seconds
-setInterval(() => {
-  const ping = new TextEncoder().encode(`:ping\n\n`)
-  for (let i = clients.length - 1; i >= 0; i--) {
-    try {
-      clients[i].controller.enqueue(ping)
-    } catch {
-      clients.splice(i, 1)
-    }
-  }
-}, 20000)
+// Les fonctions addClient / removeClient de l'ancienne sse.ts
+// ne sont plus nécessaires (elles servaient uniquement à /api/events).

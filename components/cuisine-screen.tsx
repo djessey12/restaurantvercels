@@ -1,5 +1,5 @@
 'use client'
-
+import { useRealtimeChannel } from '@/hooks/use-realtime-channel'
 import { useState, useEffect, useCallback } from 'react'
 import { getAuth, api, formatPrice, sounds } from '@/lib/store'
 import { ArrowLeft, Check, X, Play, Bell, UtensilsCrossed, Clock } from 'lucide-react'
@@ -171,26 +171,20 @@ export function CuisineScreen({ onBack }: { onBack: () => void }) {
   const { data: stats } = useSWR('/api/stats', fetcher, { refreshInterval: 10000 })
 
   // SSE connection
-  useEffect(() => {
-    if (!auth?.token) return
-    const eventSource = new EventSource(`/api/events?channel=cuisine&token=${auth.token}`)
-    
-    eventSource.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data)
-        if (data.type === 'NEW_ORDER') {
-          sounds.newOrder()
-          mutateOrders()
-          globalMutate('/api/stats')
-        } else if (data.type === 'ORDER_SERVED' || data.type === 'ITEM_TOGGLED' || data.type === 'RESET') {
-          mutateOrders()
-          globalMutate('/api/stats')
-        }
-      } catch {}
+  useRealtimeChannel('cuisine', auth?.token, (data) => {
+    if (data.type === 'NEW_ORDER') {
+      sounds.newOrder()
+      mutateOrders()
+      globalMutate('/api/stats')
+    } else if (
+      data.type === 'ORDER_SERVED' ||
+      data.type === 'ITEM_TOGGLED' ||
+      data.type === 'RESET'
+    ) {
+      mutateOrders()
+      globalMutate('/api/stats')
     }
-
-    return () => eventSource.close()
-  }, [auth?.token, mutateOrders])
+  })
 
   // Only show validated orders (not pending_validation — those are at the caisse)
   const pendingOrders = allOrders.filter(o => o.status === 'pending')

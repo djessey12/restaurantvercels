@@ -1,5 +1,5 @@
 'use client'
-
+import { useRealtimeChannel } from '@/hooks/use-realtime-channel'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { getAuth, api, formatPrice, setTrackedOrder, sounds } from '@/lib/store'
 import { ArrowLeft, Plus, Minus, Trash2, Send, ShoppingCart, Check, X, Upload, Image as ImageIcon, Video, Settings, CheckCircle, MessageSquare } from 'lucide-react'
@@ -330,43 +330,24 @@ export function CaisseScreen({ onBack, onTrack }: { onBack: () => void; onTrack?
   const [selectedValidation, setSelectedValidation] = useState<PendingOrder | null>(null)
 
   // Fetch pending_validation orders for caissier
-  useEffect(() => {
-    if (!isCaissier) return
-    const fetchPending = () => {
+  useRealtimeChannel('caisse', isStaff ? auth?.token : undefined, (data) => {
+    if (data.type === 'NEW_ORDER_VALIDATION') {
+      sounds.caisseNewOrder()
       api('/api/orders?status=pending_validation').then(orders => {
         setPendingValidation(orders)
       }).catch(() => {})
+      globalMutate('/api/stats')
+    } else if (
+      data.type === 'ORDER_STATUS_CHANGED' ||
+      data.type === 'ORDER_READY' ||
+      data.type === 'ORDER_SERVED' ||
+      data.type === 'RESET'
+    ) {
+      globalMutate('/api/stats')
+    } else if (data.type === 'MENU_UPDATED') {
+      mutateMenu()
     }
-    fetchPending()
-    const interval = setInterval(fetchPending, 5000)
-    return () => clearInterval(interval)
-  }, [isCaissier])
-
-  // SSE for caisse
-  useEffect(() => {
-    if (!auth?.token || !isStaff) return
-    const eventSource = new EventSource(`/api/events?channel=caisse&token=${auth.token}`)
-
-    eventSource.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data)
-        if (data.type === 'NEW_ORDER_VALIDATION') {
-          sounds.caisseNewOrder()
-          // Refresh pending validation list
-          api('/api/orders?status=pending_validation').then(orders => {
-            setPendingValidation(orders)
-          }).catch(() => {})
-          globalMutate('/api/stats')
-        } else if (data.type === 'ORDER_STATUS_CHANGED' || data.type === 'ORDER_READY' || data.type === 'ORDER_SERVED' || data.type === 'RESET') {
-          globalMutate('/api/stats')
-        } else if (data.type === 'MENU_UPDATED') {
-          mutateMenu()
-        }
-      } catch {}
-    }
-
-    return () => eventSource.close()
-  }, [auth?.token, isStaff, mutateMenu])
+  })
 
   const addToCart = useCallback((item: MenuItem) => {
     setCart(prev => {

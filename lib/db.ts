@@ -1,4 +1,12 @@
-// In-memory database for the restaurant management system
+/**
+ * lib/db.ts — Couche base de données Supabase
+ * Interface identique à l'ancienne version en mémoire, mais persistante.
+ * Toutes les fonctions sont async.
+ */
+
+import { createServerClient } from './supabase'
+
+// ── Types (inchangés) ────────────────────────────────────
 
 export type Category = {
   id: number
@@ -26,7 +34,8 @@ export type OrderItem = {
   emoji: string
   price: number
   qty: number
-  done: number
+  done: number          // 0 ou 1 (compatibilité frontend)
+  item_index?: number
 }
 
 export type Order = {
@@ -50,212 +59,423 @@ export type Transaction = {
   timestamp: string
 }
 
-// --- Seed Data ---
-const categories: Category[] = [
-  { id: 1, name: 'Entrees', icon: '🥗', sort: 1 },
-  { id: 2, name: 'Plats', icon: '🍽️', sort: 2 },
-  { id: 3, name: 'Desserts', icon: '🍮', sort: 3 },
-  { id: 4, name: 'Boissons', icon: '🥤', sort: 4 },
-]
+// ── Helpers ──────────────────────────────────────────────
 
-const menuItems: MenuItem[] = [
-  { id: 1, name: 'Salade Cesar', emoji: '🥗', description: 'Laitue romaine, parmesan, croutons, sauce cesar maison', price: 4500, category_id: 1, available: 1, media_url: null, media_type: null },
-  { id: 2, name: 'Soupe a l\'oignon', emoji: '🧅', description: 'Soupe traditionnelle gratinee au fromage', price: 3500, category_id: 1, available: 1, media_url: null, media_type: null },
-  { id: 3, name: 'Bruschetta', emoji: '🍅', description: 'Pain grille, tomates fraiches, basilic, huile d\'olive', price: 3000, category_id: 1, available: 1, media_url: null, media_type: null },
-  { id: 4, name: 'Accras de morue', emoji: '🐟', description: 'Beignets de morue epices, sauce chien', price: 4000, category_id: 1, available: 1, media_url: null, media_type: null },
-  { id: 5, name: 'Entrecote 300g', emoji: '🥩', description: 'Entrecote grillee, sauce au poivre, frites maison', price: 14000, category_id: 2, available: 1, media_url: null, media_type: null },
-  { id: 6, name: 'Poulet braise', emoji: '🍗', description: 'Poulet marine aux epices, braise au charbon', price: 8500, category_id: 2, available: 1, media_url: null, media_type: null },
-  { id: 7, name: 'Poisson grille', emoji: '🐠', description: 'Poisson du jour grille, legumes vapeur', price: 11000, category_id: 2, available: 1, media_url: null, media_type: null },
-  { id: 8, name: 'Riz sauce arachide', emoji: '🍚', description: 'Riz parfume, sauce arachide onctueuse, viande', price: 6500, category_id: 2, available: 1, media_url: null, media_type: null },
-  { id: 9, name: 'Spaghetti Bolognaise', emoji: '🍝', description: 'Pates fraiches, sauce tomate, viande hachee', price: 7000, category_id: 2, available: 1, media_url: null, media_type: null },
-  { id: 10, name: 'Attieke poisson', emoji: '🍛', description: 'Attieke frais, poisson braise, piment', price: 7500, category_id: 2, available: 1, media_url: null, media_type: null },
-  { id: 11, name: 'Burger Classic', emoji: '🍔', description: 'Boeuf, cheddar, salade, tomate, sauce maison', price: 8000, category_id: 2, available: 1, media_url: null, media_type: null },
-  { id: 12, name: 'Tiramisu', emoji: '🍰', description: 'Tiramisu classique au cafe et mascarpone', price: 4500, category_id: 3, available: 1, media_url: null, media_type: null },
-  { id: 13, name: 'Creme brulee', emoji: '🍮', description: 'Creme vanille, caramel croustillant', price: 4000, category_id: 3, available: 1, media_url: null, media_type: null },
-  { id: 14, name: 'Fondant chocolat', emoji: '🍫', description: 'Coeur coulant au chocolat noir', price: 5000, category_id: 3, available: 1, media_url: null, media_type: null },
-  { id: 15, name: 'Jus de fruits frais', emoji: '🧃', description: 'Jus presse du jour (mangue, ananas, passion)', price: 2500, category_id: 4, available: 1, media_url: null, media_type: null },
-  { id: 16, name: 'Bissap', emoji: '🌺', description: 'Infusion d\'hibiscus glacee, menthe', price: 2000, category_id: 4, available: 1, media_url: null, media_type: null },
-  { id: 17, name: 'Gingembre', emoji: '🫚', description: 'Jus de gingembre frais, citron, miel', price: 2000, category_id: 4, available: 1, media_url: null, media_type: null },
-]
+/** Convertit un order_item DB (boolean done) vers le type frontend (number done) */
+function mapItem(row: Record<string, unknown>): OrderItem {
+  return {
+    id:         row.id as number,
+    order_id:   row.order_id as string,
+    name:       row.name as string,
+    emoji:      row.emoji as string,
+    price:      row.price as number,
+    qty:        row.qty as number,
+    done:       row.done ? 1 : 0,
+    item_index: row.item_index as number,
+  }
+}
 
-let orders: Order[] = []
-let transactions: Transaction[] = []
-let nextItemId = 1
-let nextTransactionId = 1
-let nextMenuId = 18
+/** Convertit une order DB (avec order_items[] imbriqués) vers le type Order */
+function mapOrder(row: Record<string, unknown>): Order {
+  const rawItems = (row.order_items as Record<string, unknown>[]) ?? []
+  const sorted   = [...rawItems].sort(
+    (a, b) => (a.item_index as number) - (b.item_index as number)
+  )
+  return {
+    id:          row.id as string,
+    table_name:  row.table_name as string,
+    client_name: row.client_name as string,
+    notes:       row.notes as string,
+    status:      row.status as Order['status'],
+    total:       row.total as number,
+    rating:      row.rating as number | null,
+    created_at:  row.created_at as string,
+    updated_at:  row.updated_at as string,
+    items:       sorted.map(mapItem),
+  }
+}
 
-// --- Database API ---
+/** Génère un ID de commande unique (ex: CMD-X7KR2A) */
+async function generateOrderId(): Promise<string> {
+  const supabase = createServerClient()
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const ts  = Date.now().toString(36).slice(-4).toUpperCase()
+    const rnd = Math.random().toString(36).slice(2, 8).toUpperCase()
+    const id  = `CMD-${ts}${rnd}`
+    const { count } = await supabase
+      .from('orders')
+      .select('id', { count: 'exact', head: true })
+      .eq('id', id)
+    if (count === 0) return id
+  }
+  throw new Error('Impossible de générer un ID unique')
+}
+
+// ── API DB ────────────────────────────────────────────────
+
 export const db = {
-  // Categories
-  getCategories: () => [...categories].sort((a, b) => a.sort - b.sort),
 
-  // Menu
-  getMenu: () => menuItems.filter(m => m.available === 1).map(m => {
-    const cat = categories.find(c => c.id === m.category_id)
-    return { ...m, cat_name: cat?.name || '', cat_icon: cat?.icon || '' }
-  }),
+  // ── Catégories ────────────────────────────────────────
 
-  getMenuItem: (id: number) => menuItems.find(m => m.id === id),
-
-  addMenuItem: (item: Omit<MenuItem, 'id' | 'available' | 'media_url' | 'media_type'>) => {
-    const newItem: MenuItem = { ...item, id: nextMenuId++, available: 1, media_url: null, media_type: null }
-    menuItems.push(newItem)
-    return newItem
+  async getCategories(): Promise<Category[]> {
+    const supabase = createServerClient()
+    const { data, error } = await supabase
+      .from('categories')
+      .select('*')
+      .order('sort')
+    if (error) throw error
+    return data as Category[]
   },
 
-  deleteMenuItem: (id: number) => {
-    const item = menuItems.find(m => m.id === id)
-    if (item) item.available = 0
-    return item
+  // ── Menu ──────────────────────────────────────────────
+
+  async getMenu(): Promise<(MenuItem & { cat_name: string; cat_icon: string })[]> {
+    const supabase = createServerClient()
+    const { data, error } = await supabase
+      .from('menu_items')
+      .select('*, categories(name, icon)')
+      .eq('available', true)
+      .order('id')
+    if (error) throw error
+    return (data as Record<string, unknown>[]).map(row => ({
+      ...(row as unknown as MenuItem),
+      available:  1,
+      cat_name:   (row.categories as { name: string } | null)?.name  ?? '',
+      cat_icon:   (row.categories as { icon: string } | null)?.icon  ?? '',
+      categories: undefined,
+    }))
   },
 
-  updateMenuMedia: (id: number, media_url: string, media_type: string) => {
-    const item = menuItems.find(m => m.id === id)
-    if (item) {
-      item.media_url = media_url
-      item.media_type = media_type
-    }
-    return item
+  async getMenuItem(id: number): Promise<MenuItem | null> {
+    const supabase = createServerClient()
+    const { data, error } = await supabase
+      .from('menu_items')
+      .select('*')
+      .eq('id', id)
+      .single()
+    if (error) return null
+    return { ...(data as MenuItem), available: data.available ? 1 : 0 }
   },
 
-  // Orders
-  getOrders: (status?: string) => {
-    let result = [...orders]
-    if (status) result = result.filter(o => o.status === status)
-    return result.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+  async addMenuItem(
+    item: Omit<MenuItem, 'id' | 'available' | 'media_url' | 'media_type'>
+  ): Promise<MenuItem> {
+    const supabase = createServerClient()
+    const { data, error } = await supabase
+      .from('menu_items')
+      .insert({ ...item, available: true, media_url: null, media_type: null })
+      .select()
+      .single()
+    if (error) throw error
+    return { ...(data as MenuItem), available: 1 }
   },
 
-  getOrder: (id: string) => orders.find(o => o.id === id),
+  async deleteMenuItem(id: number): Promise<MenuItem | null> {
+    const supabase = createServerClient()
+    const { data, error } = await supabase
+      .from('menu_items')
+      .update({ available: false })
+      .eq('id', id)
+      .select()
+      .single()
+    if (error) return null
+    return { ...(data as MenuItem), available: 0 }
+  },
 
-  createOrder: (data: { table_name: string; client_name: string; notes: string; items: { menu_id: number; qty: number }[] }) => {
-    const id = generateOrderId()
-    const orderItems: OrderItem[] = data.items.map(i => {
-      const mi = menuItems.find(m => m.id === i.menu_id)
-      if (!mi) throw new Error(`Menu item ${i.menu_id} not found`)
-      return {
-        id: nextItemId++,
-        order_id: id,
-        name: mi.name,
-        emoji: mi.emoji,
-        price: mi.price,
-        qty: i.qty,
-        done: 0,
-      }
+  async updateMenuMedia(
+    id: number, media_url: string, media_type: string
+  ): Promise<MenuItem | null> {
+    const supabase = createServerClient()
+    const payload = media_url
+      ? { media_url, media_type: media_type || null }
+      : { media_url: null, media_type: null }
+    const { data, error } = await supabase
+      .from('menu_items')
+      .update(payload)
+      .eq('id', id)
+      .select()
+      .single()
+    if (error) return null
+    return { ...(data as MenuItem), available: data.available ? 1 : 0 }
+  },
+
+  // ── Commandes ─────────────────────────────────────────
+
+  async getOrders(status?: string): Promise<Order[]> {
+    const supabase = createServerClient()
+    let query = supabase
+      .from('orders')
+      .select('*, order_items(*)')
+      .order('created_at', { ascending: false })
+    if (status) query = query.eq('status', status)
+    const { data, error } = await query
+    if (error) throw error
+    return (data as Record<string, unknown>[]).map(mapOrder)
+  },
+
+  async getOrder(id: string): Promise<Order | null> {
+    const supabase = createServerClient()
+    const { data, error } = await supabase
+      .from('orders')
+      .select('*, order_items(*)')
+      .eq('id', id)
+      .single()
+    if (error) return null
+    return mapOrder(data as Record<string, unknown>)
+  },
+
+  async createOrder(payload: {
+    table_name: string
+    client_name: string
+    notes: string
+    items: { menu_id: number; qty: number }[]
+  }): Promise<Order> {
+    const supabase = createServerClient()
+
+    // 1. Valider les articles du menu
+    const menuIds = [...new Set(payload.items.map(i => i.menu_id))]
+    const { data: menuRows, error: menuErr } = await supabase
+      .from('menu_items')
+      .select('id, name, emoji, price')
+      .in('id', menuIds)
+      .eq('available', true)
+    if (menuErr) throw menuErr
+
+    const menuMap = new Map(
+      (menuRows as { id: number; name: string; emoji: string; price: number }[])
+        .map(m => [m.id, m])
+    )
+
+    // 2. Construire les items avec sous-total
+    const orderItemsData = payload.items.map((i, idx) => {
+      const mi = menuMap.get(i.menu_id)
+      if (!mi) throw new Error(`Article de menu ${i.menu_id} introuvable ou indisponible`)
+      return { menu_id: i.menu_id, name: mi.name, emoji: mi.emoji, price: mi.price, qty: i.qty, item_index: idx }
     })
-    const total = orderItems.reduce((sum, i) => sum + i.price * i.qty, 0)
-    const order: Order = {
-      id,
-      table_name: data.table_name,
-      client_name: data.client_name,
-      notes: data.notes,
-      status: 'pending_validation',
-      total,
-      items: orderItems,
-      rating: null,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+    const total = orderItemsData.reduce((s, i) => s + i.price * i.qty, 0)
+
+    // 3. Générer un ID unique
+    const id = await generateOrderId()
+
+    // 4. Insérer la commande
+    const { error: orderErr } = await supabase
+      .from('orders')
+      .insert({ id, table_name: payload.table_name, client_name: payload.client_name, notes: payload.notes, total })
+    if (orderErr) throw orderErr
+
+    // 5. Insérer les items
+    const itemRows = orderItemsData.map(i => ({
+      order_id:   id,
+      item_index: i.item_index,
+      name:       i.name,
+      emoji:      i.emoji,
+      price:      i.price,
+      qty:        i.qty,
+      done:       false,
+    }))
+    const { error: itemsErr } = await supabase.from('order_items').insert(itemRows)
+    if (itemsErr) {
+      // Rollback manuel de la commande
+      await supabase.from('orders').delete().eq('id', id)
+      throw itemsErr
     }
-    orders.push(order)
-    addTransaction(id, 'Commande creee', 'system')
+
+    // 6. Transaction initiale
+    await supabase
+      .from('transactions')
+      .insert({ order_id: id, action: 'Commande creee', actor: 'system' })
+
+    // 7. Retourner la commande complète
+    const order = await db.getOrder(id)
+    if (!order) throw new Error('Impossible de récupérer la commande créée')
     return order
   },
 
-  updateOrderStatus: (id: string, status: Order['status'], actor: string) => {
-    const order = orders.find(o => o.id === id)
-    if (!order) return null
+  async updateOrderStatus(
+    id: string,
+    status: Order['status'],
+    actor: string
+  ): Promise<Order | null> {
+    const supabase = createServerClient()
+
+    const { data: current, error: fetchErr } = await supabase
+      .from('orders')
+      .select('status')
+      .eq('id', id)
+      .single()
+    if (fetchErr) return null
 
     const validTransitions: Record<string, string[]> = {
       pending_validation: ['pending', 'cancelled'],
-      pending: ['acknowledged', 'cancelled'],
-      acknowledged: ['preparing', 'cancelled'],
-      preparing: ['ready', 'cancelled'],
-      ready: ['served', 'cancelled'],
+      pending:            ['acknowledged', 'cancelled'],
+      acknowledged:       ['preparing', 'cancelled'],
+      preparing:          ['ready', 'cancelled'],
+      ready:              ['served', 'cancelled'],
     }
+    if (!validTransitions[current.status]?.includes(status)) return null
 
-    if (!validTransitions[order.status]?.includes(status)) return null
+    const now = new Date().toISOString()
+    const { error: updErr } = await supabase
+      .from('orders')
+      .update({ status, updated_at: now })
+      .eq('id', id)
+    if (updErr) return null
 
-    order.status = status
-    order.updated_at = new Date().toISOString()
-    addTransaction(id, `Statut → ${status}`, actor)
-    return order
+    await supabase
+      .from('transactions')
+      .insert({ order_id: id, action: `Statut → ${status}`, actor })
+
+    return db.getOrder(id)
   },
 
-  toggleItemDone: (orderId: string, itemIdx: number, done: boolean) => {
-    const order = orders.find(o => o.id === orderId)
-    if (!order || !order.items[itemIdx]) return null
-    order.items[itemIdx].done = done ? 1 : 0
-    return order.items[itemIdx]
+  async toggleItemDone(
+    orderId: string,
+    itemIdx: number,
+    done: boolean
+  ): Promise<OrderItem | null> {
+    const supabase = createServerClient()
+    const { data, error } = await supabase
+      .from('order_items')
+      .update({ done })
+      .eq('order_id', orderId)
+      .eq('item_index', itemIdx)
+      .select()
+      .single()
+    if (error) return null
+    return mapItem(data as Record<string, unknown>)
   },
 
-  // Rating
-  rateOrder: (id: string, rating: number) => {
-    const order = orders.find(o => o.id === id)
-    if (!order || order.status !== 'served') return null
+  // ── Notation ──────────────────────────────────────────
+
+  async rateOrder(id: string, rating: number): Promise<Order | null> {
+    const supabase = createServerClient()
     if (rating < 1 || rating > 5) return null
-    order.rating = rating
-    return order
+
+    // Vérifier que la commande est servie
+    const { data: current } = await supabase
+      .from('orders')
+      .select('status')
+      .eq('id', id)
+      .single()
+    if (!current || current.status !== 'served') return null
+
+    const { error } = await supabase
+      .from('orders')
+      .update({ rating })
+      .eq('id', id)
+    if (error) return null
+
+    return db.getOrder(id)
   },
 
-  // History
-  getHistory: (date?: string, limit = 200) => {
-    let result = orders.filter(o => o.status === 'served')
-    if (date) {
-      result = result.filter(o => o.updated_at.startsWith(date))
-    }
-    result.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
-    
-    const served_today = orders.filter(o => o.status === 'served' && o.updated_at.startsWith(new Date().toISOString().slice(0, 10))).length
-    const revenue_today = orders.filter(o => o.status === 'served' && o.updated_at.startsWith(new Date().toISOString().slice(0, 10))).reduce((s, o) => s + o.total, 0)
+  // ── Historique ────────────────────────────────────────
 
-    return { orders: result.slice(0, limit), summary: { served_today, revenue_today } }
-  },
-
-  // Stats
-  getStats: () => {
+  async getHistory(
+    date?: string,
+    limit = 200
+  ): Promise<{ orders: Order[]; summary: { served_today: number; revenue_today: number } }> {
+    const supabase = createServerClient()
     const today = new Date().toISOString().slice(0, 10)
-    const todayOrders = orders.filter(o => o.created_at.startsWith(today))
+
+    let query = supabase
+      .from('orders')
+      .select('*, order_items(*)')
+      .eq('status', 'served')
+      .order('updated_at', { ascending: false })
+      .limit(limit)
+
+    if (date) {
+      query = query
+        .gte('updated_at', `${date}T00:00:00.000Z`)
+        .lt('updated_at',  `${date}T23:59:59.999Z`)
+    }
+
+    const { data, error } = await query
+    if (error) throw error
+
+    // Stats du jour (requête séparée)
+    const { data: todayData } = await supabase
+      .from('orders')
+      .select('total')
+      .eq('status', 'served')
+      .gte('updated_at', `${today}T00:00:00.000Z`)
+      .lt('updated_at',  `${today}T23:59:59.999Z`)
+
+    const served_today  = todayData?.length ?? 0
+    const revenue_today = (todayData ?? []).reduce((s, o) => s + o.total, 0)
+
     return {
-      orders_today: todayOrders.length,
-      revenue_today: todayOrders.filter(o => o.status === 'served').reduce((s, o) => s + o.total, 0),
-      pending_validation: orders.filter(o => o.status === 'pending_validation').length,
-      pending_orders: orders.filter(o => o.status === 'pending').length,
-      active_orders: orders.filter(o => ['acknowledged', 'preparing'].includes(o.status)).length,
-      ready_orders: orders.filter(o => o.status === 'ready').length,
-      served_today: todayOrders.filter(o => o.status === 'served').length,
+      orders:  (data as Record<string, unknown>[]).map(mapOrder),
+      summary: { served_today, revenue_today },
     }
   },
 
-  // Transactions
-  getTransactions: (orderId?: string) => {
-    let result = [...transactions]
-    if (orderId) result = result.filter(t => t.order_id === orderId)
-    return result.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+  // ── Statistiques ──────────────────────────────────────
+
+  async getStats(): Promise<{
+    orders_today: number
+    revenue_today: number
+    pending_validation: number
+    pending_orders: number
+    active_orders: number
+    ready_orders: number
+    served_today: number
+  }> {
+    const supabase = createServerClient()
+    const today = new Date().toISOString().slice(0, 10)
+
+    const [todayRes, pendingValRes, pendingRes, activeRes, readyRes] = await Promise.all([
+      supabase
+        .from('orders')
+        .select('total, status')
+        .gte('created_at', `${today}T00:00:00.000Z`),
+      supabase.from('orders').select('id', { count: 'exact', head: true }).eq('status', 'pending_validation'),
+      supabase.from('orders').select('id', { count: 'exact', head: true }).eq('status', 'pending'),
+      supabase.from('orders').select('id', { count: 'exact', head: true }).in('status', ['acknowledged', 'preparing']),
+      supabase.from('orders').select('id', { count: 'exact', head: true }).eq('status', 'ready'),
+    ])
+
+    const todayOrders  = todayRes.data ?? []
+    const servedToday  = todayOrders.filter(o => o.status === 'served')
+
+    return {
+      orders_today:       todayOrders.length,
+      revenue_today:      servedToday.reduce((s, o) => s + o.total, 0),
+      pending_validation: pendingValRes.count ?? 0,
+      pending_orders:     pendingRes.count    ?? 0,
+      active_orders:      activeRes.count     ?? 0,
+      ready_orders:       readyRes.count      ?? 0,
+      served_today:       servedToday.length,
+    }
   },
 
-  // Reset
-  reset: () => {
-    orders = []
-    transactions = []
-    nextItemId = 1
-    nextTransactionId = 1
+  // ── Transactions ──────────────────────────────────────
+
+  async getTransactions(orderId?: string): Promise<Transaction[]> {
+    const supabase = createServerClient()
+    let query = supabase
+      .from('transactions')
+      .select('*')
+      .order('created_at', { ascending: false })
+    if (orderId) query = query.eq('order_id', orderId)
+    const { data, error } = await query
+    if (error) throw error
+    return (data as Record<string, unknown>[]).map(row => ({
+      id:        row.id       as number,
+      order_id:  row.order_id as string,
+      action:    row.action   as string,
+      actor:     row.actor    as string,
+      timestamp: row.created_at as string,
+    }))
   },
-}
 
-function addTransaction(orderId: string, action: string, actor: string) {
-  transactions.push({
-    id: nextTransactionId++,
-    order_id: orderId,
-    action,
-    actor,
-    timestamp: new Date().toISOString(),
-  })
-}
+  // ── Reset (admin uniquement) ──────────────────────────
 
-function generateOrderId(): string {
-  const ts = Date.now().toString(36).slice(-4).toUpperCase()
-  const rnd = Math.random().toString(36).slice(2, 8).toUpperCase()
-  const id = `CMD-${ts}${rnd}`
-  // Check collision
-  if (orders.find(o => o.id === id)) return generateOrderId()
-  return id
+  async reset(): Promise<void> {
+    const supabase = createServerClient()
+    // Supprime tout sauf menu et catégories
+    await supabase.from('transactions').delete().neq('id', 0)
+    await supabase.from('order_items').delete().neq('id', 0)
+    await supabase.from('orders').delete().neq('id', 'X')
+  },
 }

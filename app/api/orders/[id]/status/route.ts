@@ -2,53 +2,71 @@ import { NextRequest, NextResponse } from 'next/server'
 import { authenticate, hasRole } from '@/lib/auth'
 import { db } from '@/lib/db'
 import { broadcast } from '@/lib/sse'
+import { z } from 'zod'
+
+const schema = z.object({
+  status:  z.enum(['pending', 'acknowledged', 'preparing', 'ready', 'served', 'cancelled']),
+  message: z.string().max(200).optional(),
+})
 
 const KITCHEN_STATUSES = ['acknowledged', 'preparing', 'ready', 'served']
-const CAISSE_STATUSES = ['pending']
+const CAISSE_STATUSES  = ['pending']
 
-export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const session = authenticate(req.headers.get('Authorization'))
+export async function PATCH(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const session = await authenticate(req.headers.get('Authorization'))
   if (!session) return NextResponse.json({ error: 'Non autorise' }, { status: 401 })
 
-  const { id } = await params
-  const { status, message } = await req.json()
+  let body: unknown
+  try { body = await req.json() } catch {
+    return NextResponse.json({ error: 'Corps JSON invalide' }, { status: 400 })
+  }
 
-  // Caisse validation: only caissier/admin can validate pending_validation -> pending
+  const parsed = schema.safeParse(body)
+  if (!parsed.success) {
+    return NextResponse.json({ error: 'Statut invalide' }, { status: 400 })
+  }
+
+  const { status, message } = parsed.data
+  const { id } = await params
+
   if (CAISSE_STATUSES.includes(status) && !hasRole(session, ['caissier', 'admin'])) {
     return NextResponse.json({ error: 'Seul le caissier peut valider les commandes' }, { status: 403 })
   }
-
-  // Kitchen-only statuses
   if (KITCHEN_STATUSES.includes(status) && !hasRole(session, ['cuisinier', 'chef', 'admin'])) {
     return NextResponse.json({ error: 'Acces refuse' }, { status: 403 })
   }
 
-  const order = db.updateOrderStatus(id, status, session.role)
-  if (!order) return NextResponse.json({ error: 'Transition invalide' }, { status: 400 })
+  const order = await db.updateOrderStatus(id, status as Parameters<typeof db.updateOrderStatus>[1], session.role)
+  if (!order) return NextResponse.json({ error: 'Transition invalide ou commande introuvable' }, { status: 400 })
 
-  // Emit SSE events based on status
+  // Événements temps-réel selon le statut
   switch (status) {
     case 'pending':
-      // Caisse validated -> notify cuisine + client
-      broadcast(['cuisine'], { type: 'NEW_ORDER', payload: order, sound: 'new_order' })
-      broadcast(['client'], { type: 'ORDER_VALIDATED', payload: { ...order, message: message || 'Votre commande a ete validee par la caisse !' }, sound: 'acknowledged' })
+      await broadcast(['cuisine'], { type: 'NEW_ORDER',          payload: order,                                                                sound: 'new_order'   })
+      await broadcast(['client'],  { type: 'ORDER_VALIDATED',    payload: { ...order, message: message || 'Votre commande a ete validee !' },   sound: 'acknowledged' })
       break
     case 'acknowledged':
-      broadcast(['client'], { type: 'ORDER_ACKNOWLEDGED', payload: order, sound: 'acknowledged' })
-      broadcast(['caisse'], { type: 'ORDER_STATUS_CHANGED', payload: order })
+      await broadcast(['client'],  { type: 'ORDER_ACKNOWLEDGED', payload: order, sound: 'acknowledged' })
+      await broadcast(['caisse'],  { type: 'ORDER_STATUS_CHANGED', payload: order })
       break
     case 'preparing':
-      broadcast(['client'], { type: 'ORDER_PREPARING', payload: order, sound: 'preparing' })
-      broadcast(['caisse'], { type: 'ORDER_STATUS_CHANGED', payload: order })
+      await broadcast(['client'],  { type: 'ORDER_PREPARING',    payload: order, sound: 'preparing' })
+      await broadcast(['caisse'],  { type: 'ORDER_STATUS_CHANGED', payload: order })
       break
     case 'ready':
-      broadcast(['client', 'caisse'], { type: 'ORDER_READY', payload: order, sound: 'order_ready' })
+      await broadcast(['client', 'caisse'], { type: 'ORDER_READY',      payload: order, sound: 'order_ready' })
       break
     case 'served':
-      broadcast(['client', 'caisse', 'cuisine'], { type: 'ORDER_SERVED', payload: order, sound: 'served' })
+      await broadcast(['client', 'caisse', 'cuisine'], { type: 'ORDER_SERVED', payload: order, sound: 'served' })
       break
     case 'cancelled':
-      broadcast(['caisse', 'cuisine', 'client'], { type: 'ORDER_CANCELLED', payload: { ...order, message: message || 'Commande annulee' } })
+      await broadcast(['caisse', 'cuisine', 'client'], {
+        type: 'ORDER_CANCELLED',
+        payload: { ...order, message: message || 'Commande annulee' },
+      })
       break
   }
 
