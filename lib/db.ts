@@ -144,7 +144,34 @@ export const db = {
       cat_icon:   (row.categories as { icon: string } | null)?.icon  ?? '',
       categories: undefined,
     }))
-  },
+  },async getMenu(): Promise<(MenuItem & { cat_name: string; cat_icon: string })[]> {
+  const supabase = createServerClient()
+  const { data, error } = await supabase
+    .from('menu_items')
+    .select('*, categories(name, icon)')
+    .eq('available', true)
+    .order('id')
+  
+  if (error) {
+    console.error('[getMenu] Supabase error:', error)
+    throw error
+  }
+  if (!data || !Array.isArray(data)) return []
+  
+  return data.map(row => ({
+    id:          row.id,
+    name:        row.name,
+    emoji:       row.emoji,
+    description: row.description,
+    price:       row.price,
+    category_id: row.category_id,
+    available:   1,
+    media_url:   row.media_url ?? null,
+    media_type:  row.media_type ?? null,
+    cat_name:    row.categories?.name  ?? '',
+    cat_icon:    row.categories?.icon  ?? '',
+  }))
+},
 
   async getMenuItem(id: number): Promise<MenuItem | null> {
     const supabase = createServerClient()
